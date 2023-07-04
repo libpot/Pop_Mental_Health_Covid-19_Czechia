@@ -1,0 +1,288 @@
+###################
+### EPI CORONA ###
+##################
+
+# loading necessary packages
+library(readxl) # Excel data
+library(tidyverse) # data manipulation
+library(Hmisc) # data manipulation
+library(sjlabelled) # column labels
+library(labelled) # column labels
+library(upstartr) # missing values
+
+# loading the data
+CATI <- read_excel("C:/Users/hp/Desktop/NUDZ/Epi_korona/data/01_DATA_CATI.xlsx", skip = 1)
+CAWI <- read_excel("C:/Users/hp/Desktop/NUDZ/Epi_korona/data/02_DATA_CAWI.xlsx", skip = 1)
+CAPI <- read_excel("C:/Users/hp/Desktop/NUDZ/Epi_korona/data/03_DATA_CAPI.xlsx", skip = 1)
+merged_data <- bind_rows(CATI, CAWI, CAPI) %>% 
+    mutate(SOURCE = case_when(SOURCE == 1 ~ "CATI",
+                              SOURCE == 2 ~ "CAWI",
+                              TRUE ~ "CAPI"))
+label(merged_data) <- read_excel("C:/Users/hp/Desktop/NUDZ/Epi_korona/data/01_DATA_CATI.xlsx", col_names = FALSE)[1,]
+
+merged_data_new <- remove_labels(merged_data) %>% 
+# chaning data format data format (from wide to long)
+  gather(cols, value, -c(ID, SOURCE)) %>%
+# adding variable indicating different survey topics 
+  mutate(what = case_when(grepl("^Q1$|^Q2$|^Q3$|^Q4$", cols) ~ "physical and mental health",
+                          grepl("^Q5_[1,2,3,4,5]", cols) ~ "self identification with mental illness (SELF-I)",
+                          grepl("^Q12_[1,2,3,4,5,6]", cols) ~ "satisfaction with health services",
+                          grepl("Q6$|Q8$|Q9$|^Q10_[1,2,3,4,5,6]$|^Q11_[1,2,3,4,5]$|^Q14_[1,2,3,4,5,6,7]$|^Q15_[1,2,3,4]$", cols) ~ "health services use",
+                          grepl("^Q16", cols) ~ "use of psychopharmacological medication",
+                          grepl("^Q17_[1,2,3]$|^Q18_[1,2,3]$|^Q19$", cols) ~ "alcohol consumption",
+                          grepl("Q20_1|Q20_2|^Q71", cols) ~ "weight, height and age",
+                          grepl("COV$", cols) ~ "COVID-19",
+                          grepl("^Q24DU", cols) ~ "community attitudes towards menta illness (CAMI)",
+                          grepl("^Q25DU", cols) ~ "actual contact with mentally ill people",
+                          grepl("^Q26DU", cols) ~ "potential contact with mentally ill people",
+                          grepl("^Q27DU", cols) ~ "depressivity",
+                          grepl("^Q28UZ", cols) ~ "anxiety",
+                          grepl("^Q29SP|^Q30SP", cols) ~ "self-harm",
+                          grepl("^Q31BU", cols) ~ "eating disorders",
+                          grepl("^A1|^A2|^A3_|^A4_", cols) ~ "depression",
+                          grepl("^C1|^C2|^C3|^C4|^C5|^C6", cols) ~ "suicidality",
+                          grepl("^E1_a|^E1_b|^E2|^E3|^E7", cols) ~ "panic disorder",
+                          grepl("^E4_", cols) ~ "panic disorder 2",
+                          grepl("^F1|^F2", cols) ~ "agoraphobia",
+                          grepl("^G1|^G2|^G3|^G4", cols) ~ "social phobia",
+                          grepl("^I1|^I2|^I3|^I6", cols) ~ "PTSD",
+                          grepl("^I4_", cols) ~ "PTSD 2",
+                          grepl("^I5_", cols) ~ "PTSD 3",
+                          grepl("^J1", cols) ~ "alcohol SUD",
+                          grepl("^J2_", cols) ~ "alcohol SUD 2",
+                          grepl("^J3_", cols) ~ "alcohol SUD 3",
+                          grepl("^O1_a|^O1_b|^O2", cols) ~ "GAD",
+                          grepl("^O3_", cols) ~ "GAD 2",
+                          grepl("^Q67", cols) ~ "psychoactive drug SUD",
+                          grepl("^Q68", cols) ~ "geopolitical situation",
+                          grepl("^Q69|^Q70|^Q72|^Q73|^Q74|^Q75|^Q76|^Q77|^Q79|^Q80", cols) ~ "socio-demographics",
+                          grepl("^Q78", cols) ~ "changes in income"))
+
+# changing the labels and modifying the labels to exclude introductory questions (e.g. "In the following questions, ...")
+names_labels <- data.frame(cols = colnames(merged_data), labels = as.character(label(merged_data)))
+merged_data_labelled <- merge(merged_data_new, names_labels, by = "cols")
+merged_data_labelled <- merged_data_labelled %>% mutate(labels = gsub(".-.*$", "", labels),
+                                                        value = as.numeric(value),
+                                                        item = paste0(cols, " - ", labels))
+
+
+
+###########################################################
+################## PLAUSABILITY CHECK #####################
+### checking the item responses and their distributions ###
+###########################################################
+
+# histograms for ordinal and continuous variables
+whats <- c("physical and mental health", "self identification with mental illness (SELF-I)", "satisfaction with health services", 
+           "alcohol consumption", "weight, height and age", "community attitudes towards menta illness (CAMI)", "actual contact with mentally ill people",
+           "potential contact with mentally ill people", "depressivity", "anxiety", "geopolitical situation")
+histograms <- list()
+for (i in whats) {
+  plot <- merged_data_labelled  %>% 
+    filter(what == i) %>% 
+    ggplot(aes(x = value, 
+               fill = SOURCE)) + 
+    geom_histogram() + 
+    facet_wrap(~ labels + cols, 
+               scales = "free") +
+    labs(title = i)
+  histograms[[i]] <- plot
+}
+histograms
+
+
+# bar-plots for categorical (incl. binary) variables
+whats2 <- c("COVID-19", "self-harm", "eating disorders", "depression", "suicidality", "panic disorder", "panic disorder 2",
+            "agoraphobia", "social phobia", "PTSD", "PTSD 2", "PTSD 3", "alcohol SUD", "alcohol SUD 2", "alcohol SUD 3",
+            "GAD", "GAD 2", "psychoactive drug SUD", "socio-demographics", "changes in income")
+barplots <- list()
+for (i in whats2) {
+  plot <- merged_data_labelled  %>% 
+    filter(what == i) %>% 
+    ggplot(aes(x = value, 
+               fill = SOURCE)) + 
+    geom_bar() + 
+    facet_wrap(~ labels + cols, 
+               scales = "free") +
+    labs(title = i)
+  barplots[[i]] <- plot
+}
+barplots
+
+
+# frequency tables for binary variables
+sources <- c("CATI", "CAWI", "CAPI")
+frequency_tables <- list()
+for (i in sources) {
+  freq <- merged_data_labelled %>% 
+    filter(SOURCE == i) %>% 
+    filter(what %in% c("use of psychopharmacological medication", "health services use")) %>% 
+    group_by(item) %>% 
+    summarise(relative_frequency = table(value)/length(value)*100)
+  frequency_tables[[i]] <- freq
+}
+
+
+
+
+####################################
+### checking the survey filters ###
+###################################
+
+# the following procedure was performed: we filtered observations (individuals), who responded according to the filtering criteria in order to be required to 
+# answer the subsequent follow-up questions and, then, filtered cases where these individuals didn't respond to these questions -> if there are 0 cases identified,
+# this indicates that the filtering process was successful and it enables a valid diagnostic evaluation
+
+# did seek professional help in the past?
+filter(merged_data, Q6 == 1) %>% filter(if_all(.cols = starts_with("Q7_"), is.na) # yes -> but didn't report which mental health professionals
+filter(merged_data, Q6 == 1) %>% filter(is.na(Q8)) # yes -> but didn't report if self-help services in the last 12 m. 
+filter(merged_data, Q6 == 1) %>% filter(is.na(Q9)) # yes -> but didn't report if medical help in the last 12 m.
+filter(merged_data, Q6 == 2) %>% filter(if_all(.cols = starts_with("Q15_"), is.na)) # no -> didn't report why not
+
+# did seek professional help in the last 12 months?
+filter(merged_data, Q9 == 1) %>% filter(if_all(.cols = starts_with("Q10_"), is.na)) # yes -> but didn't report which mental health professionals
+filter(merged_data, Q9 == 1) %>% filter(if_all(.cols = starts_with("Q11_"), is.na)) # yes -> but didn't report which type of care
+filter(merged_data, Q9 == 1) %>% filter(if_all(.cols = starts_with("Q12_"), is.na)) # yes -> but didn't report if satisfied
+filter(merged_data, Q9 == 1) %>% filter(if_all(.cols = starts_with("Q14_"), is.na)) # yes -> but didn't report if confronted with any barriers
+filter(merged_data, Q9 == 2) %>% filter(if_all(.cols = starts_with("Q15_"), is.na)) # no -> but didn't report why not
+
+# had a positive test results of COVID-19 or believed to be infected?
+merged_data %>% dplyr::select(ends_with("COV")) %>%
+filter(Q21COV %in% c(1,2)) %>% filter(if_any(.cols = starts_with(c("Q22COV", "Q23COV")), is.na)) # yes -> but didn't report how was the course of the disease and if any long-term issues
+nrow(filter(merged_data, Q21COV %in% c(1,2))) == nrow(filter(merged_data, if_all(.cols = c("Q22COV", "Q23COV"), not.na)))
+
+# did drink alcohol in the last 12 months?
+merged_data %>% dplyr::select(starts_with(c("Q17_", "Q18", "Q19"))) %>% 
+filter(if_any(.cols = starts_with("Q17_"), ~ . != 8)) %>% filter(if_all(.cols = starts_with("Q18_"), is.na)) # yes (beer/wine/spirits) -> but didn't report how much
+filter(if_any(.cols = starts_with("Q17_"), ~ . != 8)) %>% filter(is.na(Q19)) # yes (beer/wine/spirits) -> but didn't report if any excessive drinking
+
+# did do any self-harm ever in life?
+merged_data %>% dplyr::select(Q29SP, Q30SP) %>%
+filter(Q29SP == 1) %>% filter(is.na(Q30SP)) # yes -> but didn't report if in the past 12 months
+
+
+
+### DEPRESSION ###
+
+# loss of interest/joy/depressed mood?
+merged_data %>% dplyr::select(starts_with("A")) %>%
+filter(if_any(.cols = c(A1, A2), ~ . == 2)) %>% filter(if_all(.cols = starts_with("A3_"), is.na))  # yes -> didn't report specific symptoms
+
+# more than 5 depression-related symptoms?
+merged_data %>% dplyr::select(starts_with("A")) %>%
+filter(if_any(.cols = c(A1, A2), ~ . == 2)) %>% 
+  mutate_if(is.numeric, ~ case_when(.x == 2 ~ TRUE,
+                                    .x == 1 ~ FALSE)) %>% 
+mutate(number_of_symptoms = A1+A2+A3_a+A3_b+A3_c+A3_d+A3_e+A3_f+A3_g) %>% 
+filter(number_of_symptoms >= 5) %>% filter(is.na(A4_a)) # has at least 5 depressive symptoms -> but didn't report if multiple episodes
+
+# recurrent episodes?
+merged_data %>% dplyr::select(starts_with("A")) %>%
+filter(A4_a == 2) %>% filter(is.na(A4_a)) # yes -> but didn't report how long remissions in-between
+
+
+
+### PANIC DISORDER ###
+
+# panic attacks?
+merged_data %>% dplyr::select(starts_with("E")) %>%
+  filter(E1_a == 2) %>% filter(is.na(E1_b)) # yes -> but didn't report if peaked within 10 min
+
+# peeks within 10 min?
+merged_data %>% dplyr::select(starts_with("E")) %>%
+  filter(E1_b == 2) %>% filter(is.na(E2)) # yes -> but didn't report if comes unexpectedly
+
+# comes unexpectedly?
+merged_data %>% dplyr::select(starts_with("E")) %>%
+  filter(E2 == 2) %>% filter(is.na(E3)) # yes -> but didn't report if followed by anticipation anxiety
+
+# coupled with anticipation anxiety and more than 4 additional physiological symptoms?
+merged_data %>% dplyr::select(starts_with("E")) %>%
+  filter(E3 == 2) %>% 
+  mutate_if(is.numeric, ~ case_when(.x == 2 ~ TRUE,
+                                    .x == 1 ~ FALSE)) %>% 
+  mutate(number_of_symptoms = E4_a+E4_b +E4_c+E4_d+E4_e+E4_f+E4_g+E4_h+E4_i+E4_j+E4_k+E4_l+E4_m) %>% 
+  filter(number_of_symptoms >= 4) %>% filter(is.na(E7)) # has at least 4 additional symptoms -> but didn't report if occurs repeatedly in the last 2 weeks 
+
+
+
+### AGORAPHOBIA ###
+
+# anxiety in public spaces?
+merged_data %>% dplyr::select(starts_with("F")) %>%
+  filter(F1 == 2) %>% filter(is.na(F2)) # yes -> but didn't report if avoiding these situations
+
+
+
+### SOCIAL PHOBIA ###
+
+# anxiety in social situations?
+merged_data %>% dplyr::select(starts_with("G")) %>%
+  filter(G1 == 2) %>% filter(is.na(G2)) # yes -> but didn't report if excessive/unreasonable
+
+# excessive/unreasonable anxiety?
+merged_data %>% dplyr::select(starts_with("G")) %>%
+  filter(G2 == 2) %>% filter(is.na(G3)) # yes -> but didn't report if avoiding these situations or suffering 
+
+# avoiding these situations or suffering?
+merged_data %>% dplyr::select(starts_with("G")) %>%
+  filter(G3 == 2) %>% filter(is.na(G4)) # yes -> but didn't report if causing psycho-sosical impairments/distress
+
+
+
+### POSTTRAUMATIC STRESS DISORDER ###
+
+# experienced traumatic event?
+merged_data %>% dplyr::select(starts_with("I")) %>%
+  filter(I1 == 2) %>% filter(is.na(I2)) # yes -> but didn't report if accompanied by feelings of intensive anxiety/helplessness
+
+# accompanied by feelings of intensive anxiety/helplessness?
+merged_data %>% dplyr::select(starts_with("I")) %>%
+  filter(I2 == 2) %>% filter(is.na(I3)) # yes -> but didn't report if experiencing intrusions/flashbacks/nightmares 
+
+# experiencing intrusions/flashbacks/nightmares ?
+merged_data %>% dplyr::select(starts_with("I")) %>%
+  filter(I3 == 2) %>% filter(if_any(.cols = starts_with("I4_"), is.na)) # yes -> but didn't report additional symptoms
+
+# coupled with at least 3 additional symptoms?
+merged_data %>% dplyr::select(starts_with("I")) %>%
+  filter(I3 == 2) %>%
+  mutate_if(is.numeric, ~ case_when(.x == 2 ~ TRUE,
+                                    .x == 1 ~ FALSE)) %>% 
+  mutate(number_of_symptoms = I4_a+I4_b+I4_c+I4_d+I4_e+I4_f) %>% 
+  filter(number_of_symptoms >= 3) %>% filter(if_all(.cols = starts_with("I5_"), is.na)) # has at least 3 additional symptoms -> but didn't report if occurs repeatedly in the last 2 weeks 
+
+# 2 additional symptoms?
+merged_data %>% dplyr::select(starts_with("I")) %>%
+  mutate_if(is.numeric, ~ case_when(.x == 2 ~ TRUE,
+                                    .x == 1 ~ FALSE)) %>% 
+  mutate(number_of_symptoms = I5_a+I5_b+I5_c+I5_d+I5_e) %>% 
+  filter(number_of_symptoms >= 2) %>% filter(is.na(I6)) # yes -> but didn't report if any psycho-social impairments/distress
+
+
+
+### ALCOHOL SUD ###
+
+# drank 3 or more drinks at one occasion ?
+merged_data %>% dplyr::select(starts_with("J")) %>%
+  filter(J1 == 2) %>% filter(if_any(.cols = c(starts_with("J2_"), J3_aa), is.na)) # yes -> but didn't report if any additional symptoms
+
+# drinking despite work-/school-related duties?
+merged_data %>% dplyr::select(starts_with("J")) %>%
+  filter(J3_aa == 2) %>% filter(if_any(.cols = starts_with("J3_"), is.na)) # yes -> but didn't report if caused any problems
+
+
+
+### GENERALIZED ANXIETY DISORDER ###
+
+# generally preoccupied/worrying too much?
+merged_data %>% dplyr::select(starts_with("O")) %>%
+  filter(O1_a == 2) %>% filter(is.na(O1_b)) # yes -> but didn't report if present most of the time
+
+# present most of the time?
+merged_data %>% dplyr::select(starts_with("O")) %>%
+  filter(O1_b == 2) %>% filter(is.na(O2)) # yes -> but didn't report if difficult to control these thoughts/causing impairments 
+
+# difficult to control these thoughts/causing impairments ?
+merged_data %>% dplyr::select(starts_with("O")) %>%
+  filter(O2 == 2) %>% filter(if_any(.cols = starts_with("O3_"), is.na)) # yes -> but didn't report if any additional symptoms
