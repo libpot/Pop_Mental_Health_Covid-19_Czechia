@@ -1,0 +1,1226 @@
+########################
+### EPI-KORONA 2022 ###
+#######################
+
+### loading necessary packages ###
+library(tidyverse)  # data manipulation
+library(readxl) # Excel data
+library(boot) # bootstrapping - confidence intervals
+library(purrr) # functional programming
+library(ggplot2) # visualization
+library(survey) # post-stratification weights
+library(ggpubr) # combined plots
+
+
+
+###########################
+##### DATA IMPORTING #####
+##########################
+
+### 2017 ###
+data_2017 <- read_delim(file = "C:/Users/hp/Desktop/NUDZ/Epi_korona/Data/2017/Data_2017_raw.csv", delim = ";") %>% 
+                mutate(dot = dot.č.)
+weights_2017 <- read_delim(file = "C:/Users/hp/Desktop/NUDZ/Epi_korona/Data/2017/Weights_2017.csv", 
+                           delim = ";", 
+                           locale = locale(decimal_mark = ","))[,c("dot", "weight")]
+data_2017_eu <- read_csv("C:/Users/hp/Desktop/NUDZ/Epi_korona/data/2017/Data_2017_per_european_psychiatry.csv") %>% 
+  mutate(dot = ID)
+data_2017w <- as_tibble(merge(data_2017, weights_2017, by = "dot"))
+data_2017w <- as_tibble(merge(data_2017w, data_2017_eu[,c("dot", "Size")], by = "dot")) %>% 
+                mutate(collect_wave = "2017",
+                       collect_method = "CAPI/PAPI",
+                       id = dot,
+                       sex = factor(case_when(Kód_cílové_osoby == 1 ~ Pohlaví_1,
+                                              Kód_cílové_osoby == 2 ~ Pohlaví_2,
+                                              Kód_cílové_osoby == 3 ~ Pohlaví_3,
+                                              Kód_cílové_osoby == 4 ~ Pohlaví_4,
+                                              Kód_cílové_osoby == 5 ~ Pohlaví_5),
+                                    levels = c("1","2"), 
+                                    labels = c("male", "female")),
+                       age = case_when(Kód_cílové_osoby == 1 ~ Věk_1,
+                                       Kód_cílové_osoby == 2 ~ Věk_2,
+                                       Kód_cílové_osoby == 3 ~ Věk_3,
+                                       Kód_cílové_osoby == 4 ~ Věk_4,
+                                       Kód_cílové_osoby == 5 ~ Věk_5),
+                       education = factor(as.character(Ot1),
+                                          levels = c("1","2","3","4","5"),
+                                          labels = c("primary", "lwr_secondary", "upr_secondary", "universitary", "universitary")),
+                       work_status = factor(case_when(Ot5_9 == 1 & Ot6 == 1 ~ "self-employed",
+                                                      Ot5_9 == 1 & Ot6 == 2 ~ "employed",
+                                                      Ot5_7 == 1 ~ "student",
+                                                      Ot5_1 == 1 | Ot5_8 == 1 ~ "unemployed", # both intentional and unwanted
+                                                      Ot5_6 == 1 ~ "retired", 
+                                                      Ot5_3 == 1 ~ "parental_leave",
+                                                      TRUE ~ "other")), # in household, sickness leave, disability pension, both employed and self-employed and other
+                       marital_status = factor(case_when(Ot2 == 1 | Ot2 == 2 | Ot2 == 5 ~ "married|cohabitation", # also married but living apart
+                                                         Ot2 == 3 ~ "widowed",
+                                                         Ot2 == 4 ~ "divorced",
+                                                         Ot2 == 6 ~ "single",
+                                                         TRUE ~ "rest")),
+                       size_place_residence = factor(case_when(Size %in% 1:2 ~ 1,    
+                                                               Size == 3 ~ 2,     
+                                                               Size == 4 ~ 3,    
+                                                               Size == 5 ~ 4)),
+                       size_place_residence = factor(size_place_residence,
+                                                     levels = c("1","2","3","4"),
+                                                     labels = c(">5000", "5000-19999", "20000-99999","100000+")),
+                       E4_10 = E4j,
+                       E4_11 = E4k,
+                       E4_12 = E4l,
+                       E4_13 = E4m,
+                       psychiatrist = Ot19b_1,
+                       psychologist = Ot19b_2,
+                       general_practinioner = Ot19b_3)
+
+names(data_2017w)[grepl("^A3|^E1|^E4|^O1|^O3|^I4|^I5", names(data_2017w))] <-  sub("({1}[a-z])$", "_\\1", str_subset(names(data_2017w), "^A3|^E1|^E4|^O1|^O3|^I4|^I5")) %>% 
+                                                                        chartr('abcdefghi', '123456789',  .) 
+
+
+                                               
+
+### November 2020 ###
+data_nov_2020w <- read_csv(file = "C:/Users/hp/Desktop/NUDZ/Epi_korona/Data/2020_November/Data_November_2020.csv") %>% 
+                        mutate(collect_method = case_when(METODIKA == 1 ~ "CAWI",
+                                                          METODIKA == 2 ~ "CATI"),
+                               collect_wave = "nov_2020",
+                               weight = VAHA,
+                               sex = factor(as.character(S0), 
+                                            levels = c("1","2"), 
+                                            labels = c("male", "female")),
+                               age = S1,
+                               education = factor(as.character(S2),
+                                                  levels = c("1","2","3","4"),
+                                                  labels = c("primary", "lwr_secondary", "upr_secondary", "universitary")),
+                               work_status = factor(case_when(S8 == 1 ~ "employed",
+                                                              S8 == 2 ~ "self-employed",
+                                                              S8 == 7 ~ "student",
+                                                              S8 == 9 ~ "unemployed", 
+                                                              S8 == 8 ~ "retired", # "not-working retiree"
+                                                              S8 == 4 ~ "parental_leave",
+                                                              TRUE ~ "other")), # sickness leave, disability pension, in household and other
+                               size_place_residence = factor(as.character(S6),
+                                                             levels = c("1","2","3","4"),
+                                                             labels = c(">5000", "5000-19999", "20000-99999","100000+")),
+                               marital_status = factor(case_when(S3 == 1 | S3 == 2 | S3 == 5 ~ "married|cohabitation", # also married but living apart
+                                                                 S3 == 3 ~ "widowed",
+                                                                 S3 == 4 ~ "divorced",
+                                                                 S3 == 6 ~ "single",
+                                                                 TRUE ~ "rest")),  # in relationship, living apart
+                               E1_1 = E1A,
+                               E1_2 = E1B,
+                               O1_1 = O1A,
+                               O1_2 = O1B,
+                               J3ab = J3AB,
+                               across(.cols = starts_with("Q6_"),
+                                      ~ ifelse(.x %in% c(1, 2, 3, 4), 1, .x)),
+                               psychiatrist = Q6_1,
+                               psychologist = Q6_2,
+                               general_practinioner = Q6_3,
+                               across(.cols = c("psychiatrist", "psychologist", "general_practinioner"),
+                                      ~ ifelse(.x == -1, 0, .x)))
+
+                               
+### May 2020 ###
+data_may_2020 <- read_csv(file = "C:/Users/hp/Desktop/NUDZ/Epi_korona/Data/2020_May/Data_May_2020.csv")
+weights_may_2020 <- read_delim(file = "C:/Users/hp/Desktop/NUDZ/Epi_korona/Data/2020_May/Weights_May_2020.csv", 
+                               delim = ";", 
+                               locale = locale(decimal_mark = ","))[,c("id", "Váha")]
+data_may_2020w <- as_tibble(merge(data_may_2020, weights_may_2020, by = "id")) %>% 
+  mutate(collect_method = case_when(METODIKA == 1 ~ "CAWI",
+                                    METODIKA == 2 ~ "CATI"),
+         collect_wave = "may_2020",
+         weight = Váha,
+         sex = factor(as.character(S0), 
+                      levels = c("1","2"), 
+                      labels = c("male", "female")),
+         age = S1,
+         education = factor(as.character(S2),
+                            levels = c("1","2","3","4"),
+                            labels = c("primary", "lwr_secondary", "upr_secondary", "universitary")),
+         work_status = factor(case_when(S6 == 1 ~ "employed",
+                                        S6 == 2 ~ "self-employed",
+                                        S6 == 5 ~ "student",
+                                        S6 == 7 ~ "unemployed", 
+                                        S6 == 6 ~ "retired", # "not-working retiree"
+                                        S6 == 4 ~ "parental_leave",
+                                        TRUE ~ "other")), # in household
+         size_place_residence = factor(as.character(S4),
+                                       levels = c("1","2","3","4"),
+                                       labels = c(">5000", "5000-19999", "20000-99999","100000+")),
+         marital_status = factor(case_when(S3 == 1 | S3 == 2 | S3 == 5 ~ "married|cohabitation", # also married but living apart
+                                           S3 == 3 ~ "widowed",
+                                           S3 == 4 ~ "divorced",
+                                           S3 == 6 ~ "single",
+                                           TRUE ~ "rest")),  # in relationship, living apart
+          E1_1 = E1A,
+          E1_2 = E1B,
+          O1_1 = O1A,
+          O1_2 = O1B,
+         across(.cols = starts_with("Q6_"),
+                ~ ifelse(.x %in% c(1, 2, 3, 4), 1, .x)),
+         psychiatrist = Q6_1,
+         psychologist = Q6_2,
+         general_practinioner = Q6_3,
+         across(.cols = c("psychiatrist", "psychologist", "general_practinioner"),
+                ~ ifelse(.x == -1, 0, .x)))
+
+### 2022 ###
+data_2022_CATI <- read_excel("C:/Users/hp/Desktop/NUDZ/Epi_korona/Data/2022/01_DATA_CATI.xlsx", skip = 1)
+data_2022_CAPI <- read_excel("C:/Users/hp/Desktop/NUDZ/Epi_korona/Data/2022/03_DATA_CAPI.xlsx", skip = 1)
+data_2022_CAWI <- read_excel("C:/Users/hp/Desktop/NUDZ/Epi_korona/Data/2022/02_DATA_CAWI.xlsx", skip = 1)
+data_2022w <- bind_rows(data_2022_CATI, data_2022_CAWI, data_2022_CAPI) %>% 
+                    rename_with(.fn = ~ str_replace(.x, "Q5_", "SELFI_"),
+                                .cols = starts_with("Q5_")) %>% 
+                    mutate(collect_method = case_when(SOURCE == 1 ~ "CATI",
+                                                      SOURCE == 2 ~ "CAWI",
+                                                      TRUE ~ "CAPI/PAPI"),
+                           collect_wave = "2022",
+                           id = ID,
+                           weight = VAHA,
+                           sex = factor(as.character(Q69),
+                                        levels = c("1","2"), 
+                                        labels = c("male", "female")),
+                           gender = factor(as.character(Q70),
+                                           levels = c("1","2", "3", "4"),
+                                           labels = c("men", "women", "transgender", "non-binary")),
+                           sexual_orientation = factor(as.character(Q76),
+                                                       levels = c("1","2", "3", "4", "5"),
+                                                       labels = c("heterosexual", "lesbian", "gay", "bisexual", "other")),
+                           region_residence = as.factor(Q72),
+                           size_place_residence = factor(as.character(Q73),
+                                                         levels = c("1","2","3","4"),
+                                                         labels = c(">5000", "5000-19999", "20000-99999","100000+")),
+                           income = factor(as.character(Q80),
+                                           levels = c("1","2","3","4","5","6","7"),
+                                           labels = c("0-9k","10-19k","20-29k","30-39k","40-49k","50+k","no reply")),
+                           age = Q71,
+                           education = factor(as.character(Q81),
+                                              levels = c("1","2","3","4"),
+                                              labels = c("primary", "lwr_secondary", "upr_secondary", "universitary")),
+                           work_status_orig = factor(case_when(Q77 == 1 ~ "employed",
+                                                          Q77 == 2 ~ "self-employed",
+                                                          Q77 == 3 ~ "in household",
+                                                          Q77 == 5 ~ "disability pension",
+                                                          Q77 == 6 ~ "sickness leave",
+                                                          Q77 == 7 ~ "student",
+                                                          Q77 == 9 ~ "voluntarily unemployed",  
+                                                          Q77 == 10 ~ "involuntarily unemployed", 
+                                                          Q77 == 8 ~ "retired", 
+                                                          Q77 == 4 ~ "parental_leave")), 
+                           work_status = factor(case_when(Q77 == 1 ~ "employed",
+                                                               Q77 == 2 ~ "self-employed",
+                                                               Q77 == 7 ~ "student",
+                                                               Q77 == 9 | Q77 == 10 ~ "unemployed",  # both intentional and unwanted
+                                                               Q77 == 8 ~ "retired", # "not-working retiree"
+                                                               Q77 == 4 ~ "parental_leave",
+                                                               TRUE ~ "other")), # sickness leave, disability pension, in household
+                           marital_status = factor(case_when(Q74 == 3 ~ "rest", # in relationship, living apart
+                                                             Q74 == 1 | Q74 == 2 | Q74 == 6 ~ "married|cohabitation", # also married but living apart
+                                                             Q74 == 4 ~ "widowed",
+                                                             Q74 == 7 ~ "single",
+                                                             Q74 == 5 ~ "divorced")),
+                           marital_status_orig = factor(case_when(Q74 == 3 ~ "in relationship, living apart", # in relationship, living apart
+                                                                  Q74 == 1 ~ "married", 
+                                                                  Q74 == 2 ~ "living with a partner",
+                                                                  Q74 == 6 ~ "married, living apart",
+                                                                  Q74 == 4 ~ "widowed",
+                                                                  Q74 == 7 ~ "single",
+                                                                  Q74 == 5 ~ "divorced")),
+                            E4_10 = E4_j,
+                            E4_11 = E4_k,
+                            E4_12 = E4_l,
+                            E4_13 = E4_m,
+                           across(.cols = c("SELFI_1", "SELFI_3"),
+                                  ~ 6 - .),
+                           SELFI_composite = SELFI_1 + SELFI_2 + SELFI_3 + SELFI_4 + SELFI_5, # higher scores indicate higher degree of self-identification with having a mental disorder
+                           beer_frequency = 9 - Q17_1, # ranging from 1 (never) to 8 (every day)
+                           wine_frequency = 9 - Q17_2, # ranging from 1 (never) to 8 (every day)
+                           spirits_frequency = 9 - Q17_3, # ranging from 1 (never) to 8 (every day)
+                           beer_quantity = Q18_1, 
+                           wine_quantity = Q18_2, 
+                           spirits_quantity = Q18_3,
+                           beer_consumption = beer_frequency*beer_quantity,
+                           wine_consumption = wine_frequency*wine_quantity,
+                           spirits_consumption = spirits_frequency*spirits_quantity,
+                           alcohol_consumption = beer_consumption + wine_consumption + spirits_consumption - 6,
+                           binge_drinking = 9 - Q19, # ranging from 1 (never) to 8 (every day)
+                           across(.cols = starts_with("Q10_"),
+                                  ~ ifelse(.x %in% c(1, 2, 3, 4, 5, 6), 1, .x)),
+                           psychiatrist = Q10_1,
+                           psychologist = Q10_2,
+                           general_practinioner = Q10_3,
+                           crisis_intervention = Q10_4,
+                           online_therapy = Q10_5,
+                           help_seeking_ever = ifelse(Q6 == 1, 1, 0),
+                           help_seeking_12m = ifelse(Q9 == 1, 1, 0),
+                           across(.cols = starts_with("Q14_"),
+                                  ~ ifelse(.x %in% c(1, 2, 3, 4, 5, 6), 1, 0)),
+                           unavailability = Q14_1,
+                           long_waiting_lists = Q14_2,
+                           absence_of_inperson_examination = Q14_3,
+                           absence_of_online_examination = Q14_4,
+                           financially_burdensome = Q14_5,
+                           worries_fear_shame = Q14_6,
+                           across(.cols = starts_with("Q15_"),
+                                  ~ ifelse(.x %in% c(1, 2, 3, 4), 1, 0)),
+                           no_issues = Q15_1,
+                           structural_barriers2 = Q15_2,
+                           individual_barriers = Q15_3,
+                           long_waiting_lists = Q14_2,
+                           absence_of_inperson_examination = Q14_3,) %>% 
+  mutate(structural_barriers = as.numeric(rowSums(dplyr::select(., Q14_1:Q14_5) == 1) >= 1))
+
+names(data_2022w)[grepl("^A3|^E1|^E4|^O1|^O3|^I4|^I5", names(data_2022w))] <-  names(data_2022w)[grepl("^A3|^E1|^E4|^O1|^O3|^I4|^I5", names(data_2022w))] %>% 
+                                                          chartr('abcdefghi', '123456789',  .) 
+names(data_2022w)[grepl("^J", names(data_2022w))] <- str_replace(names(data_2022w)[grepl("^J", names(data_2022w))], "_", "")
+
+
+
+merged_data <- bind_rows(data_2017w, data_may_2020w, data_nov_2020w, data_2022w) %>% 
+  dplyr::select(id, weight, collect_wave, collect_method, sex, gender, age, education, work_status, work_status_orig, income, marital_status, marital_status_orig, region_residence, size_place_residence, SELFI_composite,
+                c(starts_with(c("A1", "A2", "A3",
+                                "E1_", "E2", "E3", "E7",
+                                "F1", "F2", 
+                                "G1", "G2", "G3", "G4", 
+                                "O1_", "O2", "O3", 
+                                "I1", "I2", "I3", "I4", "I5", "I6",
+                                "J1", "J2", "J3",
+                                "C")),
+                  E4_1:E4_9, E4_10:E4_13, -J3AB),
+                psychiatrist, psychologist, general_practinioner, crisis_intervention, online_therapy,
+                ends_with(c("_quantity", "_frequency")), binge_drinking)
+         
+         
+         
+
+##### DESCRIPTIVE STATISTICS #####
+
+descriptives_by_method_props <- merged_data %>% 
+  dplyr::select(collect_wave, collect_method, sex, education, marital_status, work_status, size_place_residence) %>% 
+  pivot_longer(-c(collect_wave, collect_method)) %>% 
+  count(collect_wave, collect_method, name, value) %>%
+  group_by(collect_wave, collect_method, name) %>%
+  mutate(prop = round(n/sum(n)*100, 2),
+         stat = paste(n, paste0("(", prop, ")"))) %>% 
+  dplyr::select(collect_wave, collect_method, name, value, stat) %>% 
+  pivot_wider(names_from = c(collect_wave, collect_method), values_from = stat)
+
+descriptives_by_method_age <- merged_data %>% 
+  dplyr::select(collect_wave, collect_method, age) %>% 
+  group_by(collect_wave, collect_method) %>% 
+  summarise(age = paste0(round(mean(age), 2)," (", round(sd(age), 2), ")")) %>% 
+  pivot_wider(names_from = c(collect_wave, collect_method), values_from = age) %>% 
+  mutate(name = "age", value = "age")
+
+descriptives_by_method <- bind_rows(descriptives_by_method_props, descriptives_by_method_age) %>% 
+  mutate(name = factor(as.character(name),
+                       levels = c("age", "sex", "education", "marital_status", "work_status", "size_place_residence"),
+                       ordered = TRUE)) %>% 
+  arrange(name) %>% 
+  dplyr::select(name, value, starts_with("2017"), starts_with("may_2020"), starts_with("nov_2020"), starts_with("2022"))
+
+write.csv(descriptives_by_method, "C:/Users/hp/Desktop/NUDZ/Epi_korona/Results/Tables/descriptives_by_method.csv")
+
+
+descriptives_overall_props <-  merged_data %>% 
+  dplyr::select(collect_wave, sex, education, marital_status, work_status, size_place_residence) %>% 
+  pivot_longer(-c(collect_wave)) %>% 
+  count(collect_wave, name, value) %>%
+  group_by(collect_wave, name) %>%
+  mutate(prop = round(n/sum(n)*100, 2),
+         stat = paste(n, paste0("(", prop, ")"))) %>% 
+  dplyr::select(collect_wave, name, value, stat) %>% 
+  pivot_wider(names_from = collect_wave, values_from = stat)
+
+descriptives_overall_age <- merged_data %>% 
+  dplyr::select(collect_wave, age) %>% 
+  group_by(collect_wave) %>% 
+  summarise(age = paste0(round(mean(age), 2)," (", round(sd(age), 2), ")")) %>% 
+  pivot_wider(names_from = collect_wave, values_from = age) %>% 
+  mutate(name = "age", value = "age")
+
+descriptives_overall <- bind_rows(descriptives_overall_props, descriptives_overall_age) %>% 
+  mutate(name = factor(as.character(name),
+                        levels = c("age", "sex", "education", "marital_status", "work_status", "size_place_residence"),
+                        ordered = TRUE)) %>% 
+  arrange(name) %>% 
+  dplyr::select(name, value, `2017`, may_2020, nov_2020, `2022`)
+
+write.csv(descriptives_overall, "C:/Users/hp/Desktop/NUDZ/Epi_korona/Results/Tables/descriptives_overall.csv")
+
+
+
+###########################################
+##### PREVALENCE OF MENTAL DISORDERS #####
+##########################################
+
+# adding diagnoses based on M.I.N.I. assessment
+merged_data_diag <- merged_data %>% 
+  mutate(across(.cols = c(starts_with(c("A1", "A2", "A3","E1_", "E2", "E3", "E7","F1", "F2","G1", "G2", "G3", "G4","O1_", "O2", "O3","I1", "I2", "I3", "I4", "I5", "I6","J1", "J2", "J3","C")),
+                          E4_1:E4_9, E4_10:E4_13),
+                ~ replace(., is.na(.), 0))) %>% 
+  mutate(major_depressive_episode = as.numeric((A1 == 2 | A2 == 2) & rowSums(dplyr::select(., A1:A3_7) == 2) >= 5),
+         panic_disorder = as.numeric(E1_1 == 2 & E1_2 == 2 & E2 == 2 & E3 == 2 & rowSums(dplyr::select(., E4_1:E4_13) == 2) >= 4 & E7 == 2),
+         agoraphobia = as.numeric(F1 == 2 & F2 == 2),
+         social_phobia = as.numeric(rowSums(dplyr::select(., G1:G4) == 2) == 4),
+         GAD = as.numeric(O1_1 == 2 & O1_2 == 2 & O2 == 2 & rowSums(dplyr::select(., O3_1:O3_6) == 2) >= 3),
+         PTSD = as.numeric(I1 == 2 & I2 == 2 & I3 == 2 & rowSums(dplyr::select(., starts_with("I4")) == 2) >= 3 & rowSums(dplyr::select(., starts_with("I5")) == 2) >= 2 & I6 == 2),
+         Jx = as.numeric(J3aa == 2 & J3ab == 2),
+         Jy = as.numeric(J2ba == 2 | J2bb == 2),
+         alcohol_dependence = as.numeric(J1 == 2 & rowSums(dplyr::select(., starts_with("J2")) == 2) >= 3),
+         alcohol_abuse = as.numeric(J1 == 2 & rowSums(dplyr::select(., starts_with("J3")) == 2) >= 1),
+         C1_rec = (C1 == 2) * 1,
+         C2_rec = (C2 == 2) * 2,
+         C3_rec = (C3 == 2) * 6,
+         C4_rec = (C4 == 2) * 10,
+         C5_rec = (C5 == 2) * 10,
+         C6_rec = (C6 == 2) * 4,
+         suicide_risk = as.numeric(rowSums(dplyr::select(., C1:C6) == 2) >= 1)) %>% 
+  mutate(level_suicide_risk = case_when(rowSums(dplyr::select(., C1_rec:C6_rec)) %in% 1:5 ~ 1,
+                                                                   rowSums(dplyr::select(., C1_rec:C6_rec)) %in% 6:9 ~ 2,
+                                                                   rowSums(dplyr::select(., C1_rec:C6_rec)) >= 10 ~ 3,
+                                                                   TRUE ~ 0),
+                                    anxiety_disorders = as.numeric(rowSums(dplyr::select(.,panic_disorder, agoraphobia, social_phobia, PTSD, GAD) == 1) >= 1), 
+                                    alcohol_use_disorders = as.numeric(rowSums(dplyr::select(., alcohol_dependence, alcohol_abuse) == 1) >= 1),
+                                    any_mental_disorder = as.numeric(major_depressive_episode| anxiety_disorders | alcohol_use_disorders | suicide_risk))
+
+
+
+### by year and collection method ###
+prevalence_disorders_by_method <- merged_data_diag %>% 
+  group_by(collect_wave,
+           collect_method) %>% 
+  nest() %>% 
+  mutate(survey_design = map(.x = data,
+                             ~ svydesign(ids = ~1, # no clusters
+                                         data = .x, 
+                                         weights = .x$weight)), # survey weights - each observation weighted by the inverse of its sampling probability
+         diagnoses = map(.x = data,
+                         ~ .x %>% dplyr::select(alcohol_dependence, alcohol_abuse, 
+                                                major_depressive_episode, 
+                                         suicide_risk, 
+                                         panic_disorder, agoraphobia, social_phobia, PTSD, GAD,
+                                         anxiety_disorders, alcohol_use_disorders, any_mental_disorder)),
+         counts = map(.x = diagnoses,
+                      ~ .x %>% mutate(across(everything(), ~ sum(.x == 1))) %>% distinct()), # no subgroup with ≤ 5 individuals
+         prevalence_mean = map2(.x = diagnoses,
+                                .y = survey_design,
+                                ~ svymean(~ as.matrix(.x),
+                                          design = .y)),
+         prevalence_CI = map(.x = prevalence_mean,
+                             ~ confint(.x, 
+                                       type = "delta.method", 
+                                       level = 0.95)),
+         prevalence = map2(.x = prevalence_mean,
+                           .y = prevalence_CI,
+                           ~ as.data.frame(cbind(.x, .y)) %>% 
+                             rownames_to_column(.) %>% 
+                             transmute(diagnosis = str_sub(as.character(rowname), start =  14),
+                                       mean =  .x,
+                                       lwr_CI = `2.5 %`,
+                                       upr_CI = `97.5 %`) %>% 
+                             mutate(across(where(is.numeric),
+                                           ~ round((.x*100),2)),
+                                    estimate = paste0(mean, " (", lwr_CI, ", ", upr_CI, ")")))) 
+
+plotting_prevalence_disorders_by_method <- prevalence_disorders_by_method %>% 
+  dplyr::select(prevalence) %>% 
+  unnest()
+
+table_prevalence_disorders_by_method <- plotting_prevalence_disorders_by_method %>% 
+  dplyr::select(-c(mean, lwr_CI, upr_CI)) %>% 
+  pivot_wider(names_from = c("collect_wave", "collect_method"),
+              values_from = "estimate") %>% 
+  mutate(diagnosis = factor(as.character(diagnosis),
+                            levels = c("any_mental_disorder", "alcohol_use_disorders", "alcohol_dependence", "alcohol_abuse","major depressive episode",
+                                       "anxiety_disorders", "social_phobia", "agoraphobia", "panic_disorder", "GAD", "PTSD", "suicide_risk"),
+                            ordered = TRUE)) %>% 
+  arrange(diagnosis)
+
+### overall - by year only ###
+prevalence_disorders_overall <- merged_data_diag %>% 
+  group_by(collect_wave) %>% 
+  nest() %>% 
+  mutate(data = map(.x = data, 
+                    ~ .x %>% mutate_all(~replace(., is.na(.), 0)))) %>% 
+  mutate(survey_design = map(.x = data,
+                             ~ svydesign(ids = ~1, # no clusters
+                                         data = .x, 
+                                         weights = .x$weight)), # survey weights - each observation weighted by the inverse of its sampling probability
+         diagnoses = map(.x = data,
+                         ~ .x %>% dplyr::select(alcohol_dependence, alcohol_abuse, 
+                                                major_depressive_episode, 
+                                         suicide_risk, 
+                                         panic_disorder, agoraphobia, social_phobia, PTSD, GAD,
+                                         anxiety_disorders, alcohol_use_disorders, any_mental_disorder)),
+         counts = map(.x = diagnoses,
+                      ~ .x %>% mutate(across(everything(), ~ sum(.x == 1))) %>% distinct()), # no subgroup with ≤ 5 individuals
+         prevalence_mean = map2(.x = diagnoses,
+                                .y = survey_design,
+                                ~ svymean(~ as.matrix(.x),
+                                          design = .y)),
+         prevalence_CI = map(.x = prevalence_mean,
+                             ~ confint(.x, 
+                                       type = "delta.method", # vahy?
+                                       level = 0.95)),
+         prevalence = map2(.x = prevalence_mean,
+                           .y = prevalence_CI,
+                           ~ as.data.frame(cbind(.x, .y)) %>% 
+                             rownames_to_column(.) %>% 
+                             transmute(diagnosis = str_sub(as.character(rowname), start =  14),
+                                       mean =  .x,
+                                       lwr_CI = `2.5 %`,
+                                       upr_CI = `97.5 %`) %>% 
+                             mutate(across(where(is.numeric),
+                                           ~ round((.x*100),2)),
+                                    estimate = paste0(mean, " (", lwr_CI, ", ", upr_CI, ")")))) 
+
+results_prevalence_disorders_overall <- prevalence_disorders_overall %>% 
+  dplyr::select(prevalence) %>% 
+  unnest() 
+
+
+table_prevalence_disorders_overall <- results_prevalence_disorders_overall %>% 
+  dplyr::select(-c(mean, lwr_CI, upr_CI)) %>% 
+pivot_wider(names_from = "collect_wave",
+            values_from = "estimate") %>% 
+  mutate(diagnosis = factor(as.character(diagnosis),
+                            levels = c("any_mental_disorder", "alcohol_use_disorders", "alcohol_dependence", "alcohol_abuse","major_depressive_episode",
+                                       "anxiety_disorders", "social_phobia", "agoraphobia", "panic_disorder", "GAD", "PTSD", "suicide_risk"),
+                            ordered = TRUE)) %>% 
+  arrange(diagnosis)
+
+write.csv(table_prevalence_disorders_overall, "C:/Users/hp/Desktop/NUDZ/Epi_korona/Results/Tables/prevalence_disorders_overall.csv")
+write.csv(table_prevalence_disorders_by_method, "C:/Users/hp/Desktop/NUDZ/Epi_korona/Results/Tables/prevalence_disorders_by_method.csv")
+  
+
+
+### GRAPHS: time trends in prevalence of mental disorders ###
+
+# selecting colorblind friendly colors
+my_colors4   <- c("2022" ="#0072B2", 
+                  "Nov 2020" = "#D55E00", 
+                  "May 2020" = "#009E73", 
+                  "2017" = "#CC79A7")
+
+# BY METHOD
+graph_prevalence_disorders_trend_by_method <- plotting_prevalence_disorders_by_method %>%
+  filter(diagnosis %in% c("any_mental_disorder", "alcohol_use_disorders", "suicide_risk", "major_depressive_episode", "anxiety_disorders")) %>% 
+  mutate(diagnosis = str_replace_all(diagnosis, "_", " "),
+         collect_wave = factor(collect_wave,
+                               levels = c("2022", "nov_2020", "may_2020", "2017"),
+                               labels = c("2022", "Nov 2020", "May 2020", "2017")),
+         collect_method = ifelse(collect_method == "PAPI", "CAPI", collect_method),
+         diagnosis = factor(as.character(diagnosis),
+                            levels = c("suicide risk", "anxiety disorders", "major depressive episode","alcohol use disorders", "any mental disorder"),
+                            ordered = TRUE)) %>% 
+  ggplot(aes(x = mean,
+           y = diagnosis,
+           color = collect_wave,
+           group = collect_wave,
+           shape = collect_wave)) +
+  geom_point(size = 2.5,
+             position = position_dodge(width = 0.8)) +
+  geom_errorbarh(aes(xmin = lwr_CI,
+                     xmax = upr_CI),
+                 linewidth = 1,
+                 position = position_dodge(width = 0.8)) +
+  scale_color_manual(values = my_colors4) +
+  scale_shape_manual(values = c(15,16,17,18)) + 
+  scale_x_continuous(expand = c(0, 0), limits = c(0, 40), breaks = c(10, 20, 30), ) +
+  labs(title = "By mode of data collection",
+       x = "prevalence (%)", 
+       y = "") +
+  theme_minimal() +
+  geom_vline(xintercept = 0, 
+             linetype = 1,
+             linewidth = 1.5) +
+  facet_grid(~ collect_method) +
+  theme(panel.spacing = unit(3, "lines"),
+        legend.position="none",
+        text = element_text(size=14),
+        panel.grid.major.y = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        axis.text.y = element_text(hjust=0),
+        strip.text = element_text(size=14),
+        plot.title = element_text(size = 14,
+                                  face = "bold",
+                                  hjust = 0.5),
+        axis.line.x = element_line(color="black", linewidth = 1))
+
+# OVERALL
+graph_prevalence_disorders_trend_overall <- results_prevalence_disorders_overall %>%
+  filter(diagnosis %in% c("any_mental_disorder", "alcohol_use_disorders", "suicide_risk", "major_depressive_episode", "anxiety_disorders")) %>% 
+  mutate(diagnosis = str_replace_all(diagnosis, "_", " "),
+         collect_wave = factor(collect_wave,
+                               levels = c("2022", "nov_2020", "may_2020", "2017"),
+                               labels = c("2022", "Nov 2020", "May 2020", "2017")),
+         diagnosis = factor(as.character(diagnosis),
+                            levels = c("suicide risk", "anxiety disorders", "major depressive episode","alcohol use disorders", "any mental disorder"),
+                            ordered = TRUE)) %>% 
+  ggplot(aes(x = mean,
+             y = diagnosis,
+             color = collect_wave,
+             group = collect_wave,
+             shape = collect_wave)) +
+  scale_shape_manual(values = c(15,16,17,18),
+                     breaks=c('2017', 'May 2020', 'Nov 2020', '2022')) + 
+  scale_color_manual(values = my_colors4, 
+                     breaks=c('2017', 'May 2020', 'Nov 2020', '2022')) +
+  geom_point(size = 2.5,
+             position = position_dodge(width = 0.8)) +
+  geom_errorbarh(aes(xmin = lwr_CI,
+                     xmax = upr_CI),
+                 linewidth = 1,
+                 position = position_dodge(width = 0.8)) +
+  scale_x_continuous(limits = c(0, 35), breaks = c(10, 20, 30), expand = c(0,0)) +
+  labs(y = "",
+       x = "",
+       title = "Overall",
+       shape = "Data collection",
+       color = "Data collection") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 14,
+                                  face = "bold",
+                                  hjust = 0.5),
+        text = element_text(size=14),
+        axis.text.y = element_text(hjust=0),
+        panel.grid.major.y = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        axis.line.x = element_line(color="black", linewidth = 1),
+        axis.line.y = element_line(color="black", linewidth = 1))
+
+graph_prevalence_combined <- ggarrange(graph_prevalence_disorders_trend_overall, 
+                                       graph_prevalence_disorders_trend_by_method, 
+                                       ncol=1, common.legend = TRUE, legend="right")
+
+graph_prevalence_combined <- annotate_figure(graph_prevalence_combined, 
+                                       top = text_grob("Prevalence of mental disorders",
+                                                       face = "bold", size = 18))
+
+ggsave(filename = "graph_prevalence_combined.eps",
+       path = "C:/Users/hp/Desktop/NUDZ/Epi_korona/Results/Graphs",
+       bg="white",
+       width = 24,
+       height = 16,
+       device='eps', 
+       dpi=700)
+
+
+
+
+
+######################
+### TREATMENT GAP ###
+#####################
+
+# legacy definition of treatment gap: psychiatrists/psychologists/GPs
+
+treatment_gap_overall <- merged_data_diag %>% 
+  dplyr::select(id, collect_wave,
+                any_mental_disorder, major_depressive_episode, anxiety_disorders, alcohol_use_disorders, suicide_risk,
+                psychiatrist, psychologist, general_practinioner) %>%
+  mutate(across(c("psychiatrist", "psychologist", "general_practinioner"),
+                ~ replace(., is.na(.), 0))) %>% 
+  mutate(not_treated = as.numeric(psychiatrist == 0 & psychologist == 0 & general_practinioner == 0)) %>% 
+  pivot_longer(names_to = "disorder",
+               values_to = "diagnosed",
+               cols = c("any_mental_disorder", "major depressive episode", "anxiety_disorders", "alcohol_use_disorders", "suicide_risk")) %>% 
+  filter(diagnosed == 1) %>% 
+  group_by(collect_wave,
+           disorder) %>% 
+  nest() %>% 
+  mutate(counts = map(.x = data,
+                      ~ sum(.x$not_treated == 1)),
+         prevalence_mean = map(.x = data,
+                               ~ lm(.x$not_treated ~ 1)),
+         prevalence_CI = map(.x = prevalence_mean,
+                             ~ confint(.x, type = "delta.method", level = 0.95)),
+         prevalence = map2(.x = prevalence_mean,
+                           .y = prevalence_CI,
+                           ~ as.data.frame(cbind(.x$coefficients, .y)) %>% 
+                             rownames_to_column(.) %>% 
+                             transmute(mean =  V1,
+                                       lwr_CI = `2.5 %`,
+                                       upr_CI = `97.5 %`) %>% 
+                             mutate(across(where(is.numeric),
+                                           ~ round((.x*100),2)),
+                                    estimate = paste0(mean, " (", lwr_CI, ", ", upr_CI, ")")))) %>%  
+  dplyr::select(prevalence) %>% 
+  unnest() %>% 
+  dplyr::select(-c(mean, lwr_CI, upr_CI)) %>% 
+  pivot_wider(names_from = "collect_wave",
+              values_from = "estimate") %>% 
+  mutate(disorder = factor(as.character(disorder),
+                            levels = c("any_mental_disorder", "alcohol_use_disorders", "alcohol_dependence", "alcohol_abuse","major depressive episode",
+                                       "anxiety_disorders", "social_phobia", "agoraphobia", "panic_disorder", "GAD", "PTSD", "suicide_risk"),
+                            ordered = TRUE)) %>% 
+  arrange(disorder)
+
+
+
+# extended definition of treatment gap: the previous one plus crisis intervention teams and online therapy
+treatment_gap_extended_2022 <- merged_data_diag %>% 
+  filter(collect_wave == "2022") %>% 
+  dplyr::select(id, collect_wave,
+                any_mental_disorder, major_depressive_episode, anxiety_disorders, alcohol_use_disorders, suicide_risk,
+                psychiatrist, psychologist, general_practinioner, crisis_intervention, online_therapy) %>%
+  mutate(across(c("psychiatrist", "psychologist", "general_practinioner"),
+                ~ replace(., is.na(.), 0)),
+         not_treated = as.numeric(psychiatrist == 0 & psychologist == 0 & general_practinioner == 0 & crisis_intervention == 0, online_therapy == 0)) %>% 
+  pivot_longer(names_to = "disorder",
+               values_to = "diagnosed",
+               cols = c("any_mental_disorder", "major depressive episode", "anxiety_disorders", "alcohol_use_disorders", "suicide_risk")) %>% 
+  filter(diagnosed == 1) %>% 
+  group_by(collect_wave,
+           disorder) %>% 
+  nest() %>% 
+  mutate(counts = map(.x = data,
+                      ~ sum(.x$not_treated == 1)),
+         prevalence_mean = map(.x = data,
+                               ~ lm(.x$not_treated ~ 1)),
+         prevalence_CI = map(.x = prevalence_mean,
+                             ~ confint(.x, type = "delta.method", level = 0.95)),
+         prevalence = map2(.x = prevalence_mean,
+                           .y = prevalence_CI,
+                           ~ as.data.frame(cbind(.x$coefficients, .y)) %>% 
+                             rownames_to_column(.) %>% 
+                             transmute(mean =  V1,
+                                       lwr_CI = `2.5 %`,
+                                       upr_CI = `97.5 %`) %>% 
+                             mutate(across(where(is.numeric),
+                                           ~ round((.x*100),2)),
+                                    estimate = paste0(mean, " (", lwr_CI, ", ", upr_CI, ")")))) %>%  
+  dplyr::select(prevalence) %>% 
+  unnest() %>% 
+  dplyr::select(-c(mean, lwr_CI, upr_CI)) %>% 
+  pivot_wider(names_from = "collect_wave",
+              values_from = "estimate") %>% 
+  mutate(disorder = factor(as.character(disorder),
+                            levels = c("any_mental_disorder", "alcohol_use_disorders", "alcohol_dependence", "alcohol_abuse","major depressive episode",
+                                       "anxiety_disorders", "social_phobia", "agoraphobia", "panic_disorder", "GAD", "PTSD", "suicide_risk"),
+                            ordered = TRUE)) %>% 
+  arrange(disorder)
+  
+treatment_gap_all <- cbind(treatment_gap_overall, treatment_gap_extended_2022[,"2022"])
+write.csv(treatment_gap_all, "C:/Users/hp/Desktop/NUDZ/Epi_korona/Results/Tables/treatment_gap_all.csv")
+
+
+
+
+################################
+### BARRIERS IN HELP-SEEKING ###
+################################
+
+# individuals who sought professional help due to their mental health in the past 12 months
+barriers_12m_overall <- data_2022w %>% 
+  dplyr::select(id, weight,
+         help_seeking_12m, 
+         structural_barriers,
+         unavailability, long_waiting_lists, absence_of_inperson_examination, absence_of_online_examination, financially_burdensome, 
+         worries_fear_shame) %>% 
+  filter(help_seeking_12m == 1) %>%
+  pivot_longer(names_to = "barrier_type",
+               values_to = "any_barrier",
+               cols = -c(id, weight, help_seeking_12m)) %>%
+  group_by(barrier_type) %>% 
+  nest() %>% 
+  mutate(counts = map(.x = data,
+                      ~ sum(.x$any_barrier == 1)), # no subgroup with ≤ 5 individuals
+         prevalence_mean = map(.x = data,
+                               ~ lm(.x$any_barrier ~ 1)),
+         prevalence_CI = map(.x = prevalence_mean,
+                             ~ confint(.x, type = "delta.method", level = 0.95)),
+         prevalence = map2(.x = prevalence_mean,
+                           .y = prevalence_CI,
+                           ~ as.data.frame(cbind(.x$coefficients, .y)) %>% 
+                             rownames_to_column(.) %>% 
+                             transmute(mean =  V1,
+                                       lwr_CI = `2.5 %`,
+                                       upr_CI = `97.5 %`) %>% 
+                             mutate(across(where(is.numeric),
+                                           ~ round((.x*100),2)),
+                                    estimate = paste0(mean, " (", lwr_CI, ", ", upr_CI, ")")))) %>%  
+  dplyr::select(prevalence) %>% 
+  unnest() %>% 
+  select(barrier_type, estimate)
+
+write.csv(barriers_12m_overall, "C:/Users/hp/Desktop/NUDZ/Epi_korona/Results/Tables/barriers_12m_overall.csv")
+
+
+
+# individuals who never sought help during their lifetime or who did not seek help in the past 12 months
+barriers_never_overall <- data_2022w %>% 
+  dplyr::select(id, weight, 
+         help_seeking_12m, help_seeking_ever,
+         individual_barriers, structural_barriers2, no_issues) %>% 
+  filter(help_seeking_ever == 0 | help_seeking_ever == 1 & help_seeking_12m == 0) %>%
+  pivot_longer(names_to = "barrier_type",
+               values_to = "any_barrier",
+               cols = -c(id, weight, help_seeking_ever, help_seeking_12m)) %>%
+  group_by(barrier_type) %>% 
+  nest() %>% 
+  mutate(counts = map(.x = data,
+                      ~ sum(.x$any_barrier == 1)), # no subgroup with ≤ 5 individuals
+         prevalence_mean = map(.x = data,
+                               ~ lm(.x$any_barrier ~ 1)),
+         prevalence_CI = map(.x = prevalence_mean,
+                             ~ confint(.x, type = "delta.method", level = 0.95)),
+         prevalence = map2(.x = prevalence_mean,
+                           .y = prevalence_CI,
+                           ~ as.data.frame(cbind(.x$coefficients, .y)) %>% 
+                             rownames_to_column(.) %>% 
+                             transmute(mean =  V1,
+                                       lwr_CI = `2.5 %`,
+                                       upr_CI = `97.5 %`) %>% 
+                             mutate(across(where(is.numeric),
+                                           ~ round((.x*100),2)),
+                                    estimate = paste0(mean, " (", lwr_CI, ", ", upr_CI, ")")))) %>%  
+  dplyr::select(prevalence) %>% 
+  unnest() 
+
+
+
+
+##########################################################
+### PREVALENCE OF MENTAL DISORDERS: 2017 vs. 2020/2022 ###
+##########################################################
+
+data_year_comparison <- prevalence_disorders_by_method %>% 
+  dplyr::select(data, diagnoses) %>% 
+  unnest() %>% 
+  dplyr::select(id, weight, collect_method, collect_wave,
+         any_mental_disorder, major_depressive_episode, anxiety_disorders, alcohol_use_disorders, suicide_risk,
+         sex, age, education, work_status, marital_status, size_place_residence) %>%  
+  pivot_longer(names_to = "disorder",
+               values_to = "diagnosed",
+               cols = c("any_mental_disorder", "major_depressive_episode", "anxiety_disorders", "alcohol_use_disorders", "suicide_risk")) %>% 
+  group_by(disorder) %>% 
+  nest() %>% 
+  mutate(survey_design = map(.x = data,
+                             ~ svydesign(ids = ~1, # no clusters
+                                         data = .x,
+                                         weights = .x$weight)), # survey weights - each observation weighted by the inverse of its sampling probability
+         logit_models = map2(.x = data,
+                             .y = survey_design, 
+                             ~ svyglm(I(diagnosed == 1) ~ collect_wave + sex + age + education + work_status + marital_status + size_place_residence,
+                                      family = quasibinomial(), # this family avoids warnings and gives identical estimates
+                                      data = .x,
+                                      rescale = TRUE, # weights are rescaled to the sum of the sample size
+                                      design = .y)),
+         point_estimates = map(.x = logit_models,
+                               ~ round(exp(summary(.x)$coefficients[, "Estimate"]),2)),
+         CI_estimates = map(.x = logit_models,
+                            ~ round(exp(confint(.x, method = "likelihood",level = 0.95)),2)),
+         model_estimates = map2(.x = point_estimates,
+                                .y = CI_estimates,
+                                ~ as.data.frame(cbind(.x, .y)) %>%
+                                  rownames_to_column(.) %>% 
+                                  transmute(value = str_remove(as.character(rowname), "collect_wave"),
+                                            point_estimate =  .x,
+                                            lwr_CI = `2.5 %`,
+                                            upr_CI = `97.5 %`,
+                                            estimate = paste0(point_estimate, " (", lwr_CI, ", ", upr_CI, ")"))))
+
+plotting_year_comparison <- data_year_comparison %>% 
+  dplyr::select(model_estimates) %>% 
+  unnest() %>% 
+  filter(value %in% c("2022", "may_2020", "nov_2020"))
+
+results_year_comparison <- plotting_year_comparison %>% 
+  dplyr::select(disorder, value, estimate) %>% 
+  pivot_wider(names_from = "disorder",
+              values_from = "estimate")
+write.csv(results_year_comparison, "C:/Users/hp/Desktop/NUDZ/Epi_korona/Results/Tables/relative_risk_prevalence.csv")
+
+
+
+# CAPI/PAPI: 2017 vs. 2022
+CAPI_comparison <- prevalence_disorders_by_method %>% 
+  filter(collect_method == "CAPI/PAPI") %>% 
+  dplyr::select(data, diagnoses) %>% 
+  unnest() %>% 
+  dplyr::select(id, weight, collect_method, collect_wave,
+                any_mental_disorder, major_depressive_episode, anxiety_disorders, alcohol_use_disorders, suicide_risk,
+                sex, age, age_cat, education, work_status, marital_status, size_place_residence) %>%  
+  pivot_longer(names_to = "disorder",
+               values_to = "diagnosed",
+               cols = c("any_mental_disorder", "major_depressive_episode", "anxiety_disorders", "alcohol_use_disorders", "suicide_risk")) %>% 
+  group_by(disorder) %>% 
+  nest() %>% 
+  mutate(survey_design = map(.x = data,
+                             ~ svydesign(ids = ~1, # no clusters
+                                         data = .x,
+                                         weights = .x$weight)), # survey weights - each observation weighted by the inverse of its sampling probability
+         logit_models = map2(.x = data,
+                             .y = survey_design, 
+                             ~ svyglm(I(diagnosed == 1) ~ collect_wave*sex + collect_wave*age_cat + education + work_status + marital_status + size_place_residence,
+                                      family = quasibinomial(), # this family avoids warnings and gives identical estimates
+                                      data = .x,
+                                      rescale = TRUE, # weights are rescaled to the sum of the sample size
+                                      design = .y)),
+         point_estimates = map(.x = logit_models,
+                               ~ round(exp(summary(.x)$coefficients[, "Estimate"]),2)),
+         CI_estimates = map(.x = logit_models,
+                            ~ round(exp(confint(.x, method = "likelihood",level = 0.95)),2)),
+         model_estimates = map2(.x = point_estimates,
+                                .y = CI_estimates,
+                                ~ as.data.frame(cbind(.x, .y)) %>%
+                                  rownames_to_column(.) %>% 
+                                  transmute(value = str_remove(as.character(rowname), "collect_wave"),
+                                            point_estimate =  .x,
+                                            lwr_CI = `2.5 %`,
+                                            upr_CI = `97.5 %`,
+                                            estimate = paste0(point_estimate, " (", lwr_CI, ", ", upr_CI, ")"))))
+
+plotting_CAPI_comparison <- CAPI_comparison %>% 
+  dplyr::select(model_estimates) %>% 
+  unnest() %>% 
+  filter(value == "2022")
+
+results_CAPI_comparison <- CAPI_comparison %>% 
+  dplyr::select(model_estimates) %>% 
+  unnest() %>% 
+  dplyr::select(disorder, value, estimate) %>% 
+  pivot_wider(names_from = "disorder",
+              values_from = "estimate")
+write.csv(results_CAPI_comparison, "C:/Users/hp/Desktop/NUDZ/Epi_korona/Results/Tables/relative_risk_prevalence.csv")
+
+
+
+# graph
+# overall: 2017 vs. the rest
+graph_relative_risk <- plotting_year_comparison %>%
+  mutate(diagnosis = str_replace_all(disorder, "_", " "),
+         value = factor(value,
+                        levels = c("2022", "nov_2020", "may_2020", "2017"),
+                        labels = c("2022", "Nov 2020", "May 2020", "2017")),
+         diagnosis = factor(as.character(diagnosis),
+                            levels = c("suicide risk", "anxiety disorders", "major depressive episode","alcohol use disorders", "any mental disorder"),
+                            ordered = TRUE)) %>% 
+  ggplot(aes(x = point_estimate,
+             y = diagnosis,
+             color = value,
+             group = value,
+             shape = value)) +
+  scale_shape_manual(values = c(15,16,17,18),
+                     breaks=c('May 2020', 'Nov 2020', '2022')) + 
+  scale_color_manual(values = my_colors4,
+                     breaks=c('2017', 'May 2020', 'Nov 2020', '2022')) +
+  scale_x_continuous(trans = "log10", limit = c(0.6, NA), breaks = c(0.7, 1, 2, 3, 4, 5)) +
+  geom_point(size = 2.5,
+             position = position_dodge(width = 0.8)) +
+  geom_errorbarh(aes(xmin = lwr_CI,
+                     xmax = upr_CI),
+                 linewidth = 1,
+                 position = position_dodge(width = 0.8)) +
+  geom_vline(xintercept = 1, 
+             linetype = 2,
+             linewidth = 1) +
+  labs(y = "",
+       x = "Odds ratio (OR)",
+       title = "Relative risk of mental disorder occurrence",
+       shape = "Data collection",
+       color = "Data collection") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 14,
+                                  face = "bold",
+                                  hjust = 0.5),
+        panel.grid.major.y = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        text = element_text(size=14),
+        axis.text.y = element_text(hjust=0),
+        axis.line.x = element_line(color="black", linewidth = 1),
+        axis.line.y = element_line(color="black", linewidth = 1))
+
+ggsave(filename = "graph_relative_risk.eps",
+       path = "C:/Users/hp/Desktop/NUDZ/Epi_korona/Results/Graphs", 
+       width = 18, 
+       height = 12, 
+       device='eps', 
+       bg="white",
+       dpi=700)
+
+# CAPI/PAPI: 2017 vs. 2022
+graph_CAPI_comparison <- plotting_CAPI_comparison %>%
+  mutate(diagnosis = str_replace_all(disorder, "_", " "),
+         value = factor(value,
+                        levels = c("2022", "nov_2020", "may_2020", "2017"),
+                        labels = c("2022", "Nov 2020", "May 2020", "2017")),
+         diagnosis = factor(as.character(diagnosis),
+                            levels = c("suicide risk", "anxiety disorders", "major depressive episode","alcohol use disorders", "any mental disorder"),
+                            ordered = TRUE)) %>% 
+  ggplot(aes(x = point_estimate,
+             y = diagnosis,
+             color = value,
+             group = value,
+             shape = value)) +
+  scale_shape_manual(values = c(15,16,17,18),
+                     breaks=c('May 2020', 'Nov 2020', '2022')) + 
+  scale_color_manual(values = my_colors4,
+                     breaks=c('May 2020', 'Nov 2020', '2022')) +
+  scale_x_continuous(trans = "log10", breaks = c(1, 2, 3, 4, 5)) +
+  geom_point(size = 2.5,
+             position = position_dodge(width = 0.8)) +
+  geom_errorbarh(aes(xmin = lwr_CI,
+                     xmax = upr_CI),
+                 linewidth = 1,
+                 position = position_dodge(width = 0.8)) +
+  geom_vline(xintercept = 1, 
+             linetype = 2,
+             linewidth = 1) +
+  labs(y = "",
+       x = "Odds ratio (OR)",
+       title = "CAPI/PAPI method",
+       shape = "Mode of data collection",
+       color = "Mode of data collection") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 14,
+                                  face = "bold",
+                                  hjust = 0.5),
+        axis.text.y=element_blank(),
+        text = element_text(size=14),
+        panel.grid.major.y = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        axis.line.x = element_line(color="black", linewidth = 1),
+        axis.line.y = element_line(color="black", linewidth = 1))
+
+combined_risk_graph <- ggarrange(graph_relative_risk, NULL, graph_CAPI_comparison, 
+                                 widths = c(1, 0.05, 1), nrow=1, common.legend = TRUE, legend="right")
+
+combined_risk_graph <- annotate_figure(combined_risk_graph, 
+                                       top = text_grob("Relative risk of mental disorder occurrence",
+                                                       face = "bold", size = 18))
+
+ggsave(filename = "combined_risk_graph.eps",
+       path = "C:/Users/hp/Desktop/NUDZ/Epi_korona/Results/Graphs", 
+       width = 18, 
+       height = 12, 
+       device='eps', 
+       bg="white",
+       dpi=700)
+
+
+
+
+####################################################################################################
+### ASSOCIATION BETWEEN SOCIO-DEMIOGRAPHICS/BEHAVIORAL CHARACTERISTICS AND HELP-SEEKING BEHAVIOR ###
+############################### IN PEOPLE WITH MENTAL ILLNESS ######################################
+###################################################################################################
+
+help_seeking_sociodemographics <- prevalence_disorders_overall %>% 
+  filter(collect_wave == "2022") %>% 
+  dplyr::select(data, diagnoses) %>% 
+  unnest() %>% 
+  dplyr::select(id, weight,
+         any_mental_disorder, major_depressive_episode, anxiety_disorders, alcohol_use_disorders, suicide_risk,
+         psychiatrist, psychologist, general_practinioner, crisis_intervention, online_therapy,
+         sex, gender, age, education, work_status_orig, marital_status_orig, income, region_residence, size_place_residence, 
+         SELFI_composite, ends_with(c("_quantity", "_frequency")), binge_drinking) %>% 
+  mutate(help_seeking = as.numeric(psychiatrist == 1 | psychologist == 1 | general_practinioner == 1 | crisis_intervention == 1 | online_therapy == 1),
+         marital_status_orig = relevel(marital_status_orig, "married"),
+         work_status_orig = relevel(work_status_orig, "employed"),
+         gender = factor(case_when(gender == "women" ~ "women",
+                                   gender == "men" ~ "men",
+                                   TRUE ~ "transgender/non-binary"))) %>%
+  pivot_longer(names_to = "disorder",
+               values_to = "diagnosed",
+               cols = c("any_mental_disorder", "major depressive episode", "anxiety_disorders", "alcohol_use_disorders", "suicide_risk")) %>% 
+  filter(diagnosed == 1) 
+
+# factor variables
+help_seeking_sociodemographics_factors <- help_seeking_sociodemographics %>% 
+  pivot_longer(names_to = "variable",
+               values_to = "value",
+               cols = c("sex", "gender", "education", "work_status_orig", "income", "marital_status_orig", "region_residence", "size_place_residence")) %>% 
+  group_by(disorder,
+           variable) %>% 
+  nest() %>% 
+  mutate(logit_models = map(.x = data,
+                            ~ glm(I(help_seeking == 1) ~ value,
+                                   family = binomial(link="logit"), 
+                                   data = .x)),
+         point_estimates = map(.x = logit_models,
+                               ~ round(exp(summary(.x)$coefficients[, "Estimate"]),2)),
+         CI_estimates = map(.x = logit_models,
+                            ~ round(exp(confint(.x, method = "likelihood",level = 0.95)),2)),
+         model_estimates = map2(.x = point_estimates,
+                                .y = CI_estimates,
+                                ~ as.data.frame(cbind(.x, .y)) %>% 
+                                  rownames_to_column(.) %>% 
+                                  transmute(value = str_remove(as.character(rowname), "value"),
+                                            mean =  .x,
+                                            lwr_CI = `2.5 %`,
+                                            upr_CI = `97.5 %`,
+                                            estimate = paste0(mean, " (", lwr_CI, ", ", upr_CI, ")"))))
+  
+results_help_seeking_sociodemographics_factors <- help_seeking_sociodemographics_factors %>% 
+  dplyr::select(model_estimates) %>% 
+  unnest() %>% 
+  filter(value != "(Intercept)") %>% 
+  dplyr::select(-c(mean, lwr_CI, upr_CI)) %>% 
+  pivot_wider(names_from = "disorder",
+              values_from = "estimate")
+
+lapply(help_seeking_sociodemographics_factors[help_seeking_sociodemographics_factors$variable == "gender",]$data, # N < 10 in anxiety, major_depressive_episodean alcohol -> exclusion
+       function (x) sum(x$value %in% c("transgender/non-binary")))
+
+lapply(help_seeking_sociodemographics_factors[help_seeking_sociodemographics_factors$variable == "gender",]$data, 
+       function (x) xtabs(~ help_seeking + value, data = x)[,c(1,4)])
+
+lapply(help_seeking_sociodemographics_factors[help_seeking_sociodemographics_factors$variable == "marital_status",]$data, 
+       function (x) xtabs(~ help_seeking + value, data = x)[,c(1,25:29)])
+
+
+    
+# continuous variables
+help_seeking_sociodemographics_continuous <- help_seeking_sociodemographics %>% 
+  mutate(across(c("age", "SELFI_composite", ends_with(c("_quantity", "_frequency")), "binge_drinking"),
+                ~ (.x - mean(.x))/sd(.x))) %>% 
+  pivot_longer(names_to = "variable",
+               values_to = "value",
+               cols = c("age", "SELFI_composite", ends_with(c("_quantity", "_frequency")), "binge_drinking")) %>% 
+  group_by(disorder,
+           variable) %>% 
+  nest() %>% 
+  mutate(logit_models = map(.x = data,
+                            ~ glm(I(help_seeking == 1) ~ value,
+                                  family = binomial(link="logit"), 
+                                  data = .x)),
+         point_estimates = map(.x = logit_models,
+                               ~ exp(summary(.x)$coefficients[,"Estimate"])),
+         CI_estimates = map(.x = logit_models,
+                            ~ exp(confint(.x, method = "likelihood",level = 0.95))),
+         model_estimates = map2(.x = point_estimates,
+                                .y = CI_estimates,
+                                ~ as.data.frame(cbind(.x, .y)) %>% 
+                                  transmute(mean =  .x,
+                                            lwr_CI = `2.5 %`,
+                                            upr_CI = `97.5 %`) %>% 
+                                  filter(rownames(.) == "value")))
+
+results_help_seeking_sociodemographics_continuous <- help_seeking_sociodemographics_continuous %>% 
+  dplyr::select(model_estimates) %>% 
+  unnest() %>% 
+  mutate(across(where(is.numeric),
+                ~ round(.x,2)),
+         estimate = paste0(mean, " (", lwr_CI, ", ", upr_CI, ")")) %>% 
+  dplyr::select(-c(mean, lwr_CI, upr_CI)) %>% 
+  pivot_wider(names_from = "disorder",
+              values_from = "estimate")
+
+# final results
+results_help_seeking_sociodemographics <- rbind(results_help_seeking_sociodemographics_factors, 
+                                                results_help_seeking_sociodemographics_continuous)
+
+
+
+#################################################################################################################
+### ASSOCIATION BETWEEN SOCIO-DEMIOGRAPHICS/BEHAVIORAL CHARACTERISTICS AND PERCEIVED BARRIERS IN HELP-SEEKING ### 
+#################################################################################################################
+
+barriers_sociodemographics <- data_2022w %>% 
+  dplyr::select(id, weight,
+         sex, gender, age, education, work_status_orig, income, marital_status_orig, region_residence, size_place_residence, 
+         SELFI_composite, ends_with(c("_quantity", "_frequency")), binge_drinking,
+         structural_barriers, worries_fear_shame, # those that sought help in the past 12 months
+         structural_barriers2, individual_barriers, # the rest
+         help_seeking_ever, help_seeking_12m) %>%
+  mutate(help_seeking_not12m = as.numeric(help_seeking_ever == 0 | help_seeking_ever == 1 & help_seeking_12m == 0),
+         structural_barriers = ifelse(help_seeking_not12m == 1, structural_barriers2, structural_barriers),
+         worries_fear_shame = ifelse(help_seeking_not12m == 1, individual_barriers, worries_fear_shame),
+         gender = factor(case_when(gender == "women" ~ "women",
+                                   gender == "men" ~ "men",
+                                   TRUE ~ "transgender/non-binary"))) %>% # 10 a 15 dokopy 
+  pivot_longer(names_to = "help_seeking_time",
+               values_to = "did_seek_help",
+               cols = c("help_seeking_12m", "help_seeking_not12m")) %>% 
+  filter(did_seek_help == 1) %>% 
+  pivot_longer(names_to = "barrier_type",
+               values_to = "any_barrier",
+               cols = c("structural_barriers", "worries_fear_shame")) 
+  
+# factor variables
+barriers_sociodemographics_factors <- barriers_sociodemographics %>% 
+  pivot_longer(names_to = "variable",
+               values_to = "value",
+               cols = c("sex", "gender", "education", "work_status_orig", "income", "marital_status_orig", "region_residence", "size_place_residence")) %>% 
+  group_by(help_seeking_time,
+           variable,
+           barrier_type) %>% 
+  nest() %>% 
+  mutate(logit_models = map(.x = data, 
+                             ~ glm(I(any_barrier == 1) ~ value,
+                                   family = binomial(link="logit"), 
+                                   data = .x)),
+         point_estimates = map(.x = logit_models,
+                               ~ round(exp(summary(.x)$coefficients[, "Estimate"]),2)),
+         CI_estimates = map(.x = logit_models,
+                            ~ round(exp(confint(.x, method = "likelihood",level = 0.95)),2)),
+         model_estimates = map2(.x = point_estimates,
+                                .y = CI_estimates,
+                                ~ as.data.frame(cbind(.x, .y)) %>% 
+                                  rownames_to_column(.) %>% 
+                                  transmute(value = str_remove(as.character(rowname), "value"),
+                                            mean =  .x,
+                                            lwr_CI = `2.5 %`,
+                                            upr_CI = `97.5 %`,
+                                            estimate = paste0(mean, " (", lwr_CI, ", ", upr_CI, ")"))))
+
+results_barriers_sociodemographics_factors <- barriers_sociodemographics_factors %>% 
+  dplyr::select(model_estimates) %>% 
+  unnest() %>% 
+  filter(value != "(Intercept)") %>% 
+  dplyr::select(-c(mean, lwr_CI, upr_CI)) %>%
+  pivot_wider(names_from = c("help_seeking_time", "barrier_type"),
+              values_from = "estimate")
+
+lapply(barriers_sociodemographics_factors[barriers_sociodemographics_factors$variable == "gender",]$data, # N >= 10 in all categories
+       function (x) sum(x$value %in% c("transgender/non-binary")))
+
+# continuous variables
+barriers_sociodemographics_continuous <- barriers_sociodemographics %>% 
+  mutate(across(c("age", "SELFI_composite", ends_with(c("_quantity", "_frequency")), "binge_drinking"),
+                ~ (.x - mean(.x, na.rm = T))/sd(.x, na.rm = T))) %>% 
+  pivot_longer(names_to = "variable",
+               values_to = "value",
+               cols = c("age", SELFI_composite, ends_with(c("_quantity", "_frequency")), "binge_drinking")) %>% 
+  group_by(help_seeking_time,
+           variable,
+           barrier_type) %>% 
+  nest() %>% 
+  mutate(logit_models = map(.x = data, 
+                            ~ glm(I(any_barrier == 1) ~ value,
+                                  family = binomial(link="logit"), 
+                                  data = .x,
+                                  maxit = 150)),
+         point_estimates = map(.x = logit_models,
+                               ~ exp(summary(.x)$coefficients[,"Estimate"])),
+         CI_estimates = map(.x = logit_models,
+                            ~ exp(confint(.x, method = "likelihood", level = 0.95))), 
+         model_estimates = map2(.x = point_estimates,
+                                .y = CI_estimates,
+                                ~ as.data.frame(cbind(.x, .y)) %>% 
+                                  transmute(mean =  .x,
+                                            lwr_CI = `2.5 %`,
+                                            upr_CI = `97.5 %`) %>% 
+                                  filter(rownames(.) == "value")))
+
+results_barriers_sociodemographics_continuous <- barriers_sociodemographics_continuous %>% 
+  dplyr::select(model_estimates) %>% 
+  unnest() %>% 
+  mutate(across(where(is.numeric),
+                ~ round(.x,2)),
+         estimate = paste0(mean, " (", lwr_CI, ", ", upr_CI, ")")) %>% 
+  dplyr::select(-c(mean, lwr_CI, upr_CI)) %>% 
+  pivot_wider(names_from = c("help_seeking_time", "barrier_type"),
+              values_from = "estimate")
+
+
+# final results
+results_barriers_sociodemographics <- rbind(results_barriers_sociodemographics_factors, 
+                                            results_barriers_sociodemographics_continuous) 
+
+# RESULTS: models for both barriers and help-seeking
+results_barriers_help_seeking_models <- cbind(results_help_seeking_sociodemographics, results_barriers_sociodemographics[,-c(1,2)])
+write.csv(results_barriers_help_seeking_models, "C:/Users/hp/Desktop/NUDZ/Epi_korona/Results/Tables/results_barriers_help_seeking_models.csv")
